@@ -70,8 +70,11 @@ conda activate acceleratellm
 # PyTorch for your CUDA version (see https://pytorch.org/get-started/locally/)
 pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-pip install -r requirements.txt
-pip install -e . --no-deps
+pip install -r requirements.txt   # required: pins transformers==4.57.1 (5.x is not supported)
+pip install -e . --no-deps        # installs only this package; dependencies come from the line above
+# Preinstalled images (e.g. Google Colab): torchvision/torchaudio built for another torch break
+# `import transformers`; this project does not use them:
+#   pip uninstall -y torchvision torchaudio
 
 # FlashAttention 2. Option A: prebuilt wheel matching python/torch/CUDA/C++ ABI, from
 # https://github.com/Dao-AILab/flash-attention/releases (v2.8.3), e.g. for py3.12 + torch2.8 + cu12:
@@ -276,6 +279,8 @@ produced by `scripts/summarize.py`.
 | `Expose exactly one CUDA GPU` | Set `CUDA_VISIBLE_DEVICES` to a single index |
 | `ImportError` / undefined symbol in `flash_attn` | The wheel does not match python/torch/CUDA/ABI; reinstall the matching wheel (Step 2) |
 | `No module named einops` (FA2) | `pip install einops==0.8.1` |
+| `Could not import module 'Qwen3ForCausalLM'` | Run `python -c "import transformers.models.qwen3.modeling_qwen3"` to see the real error. Usual causes: transformers 5.x installed (run `pip install -r requirements.txt`), or torchvision/torchaudio that do not match torch (`pip uninstall -y torchvision torchaudio`) |
+| `... is not a supported wheel on this platform` (flash-attn) | The wheel's `cpXY` tag must match your Python (e.g. `cp313` for Python 3.13), and `torchX.Y` / `cxx11abi` must match torch |
 | `OSError ... local_files_only` | Run Step 3 first, or unset `HF_HUB_OFFLINE` for the download |
 | `MT-Bench ... missing` / `differs from the pinned` | Run `python scripts/fetch_data.py` (it verifies SHA256) |
 | Slurm job finds no `outputs/` | `mkdir -p outputs` before `sbatch` |
