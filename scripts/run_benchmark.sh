@@ -21,6 +21,7 @@ PYTHON="${PYTHON:-python}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
+export USE_TF=0 USE_FLAX=0   # images with TensorFlow/JAX preinstalled (e.g. Colab): keep transformers PyTorch-only
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
