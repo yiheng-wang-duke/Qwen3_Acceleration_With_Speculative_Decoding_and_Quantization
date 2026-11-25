@@ -1,0 +1,19 @@
+seed: 42
+output_dir: outputs
+runtime:
+  device: cuda
+  dtype: bfloat16
+  attn_implementation: flash_attention_2
+  local_files_only: true
+  threads: 4
+generation:
+  strategy: greedy
+  max_new_tokens: 128
+  temperature: 1.0
+  top_p: 1.0
+benchmark:
+  warmup: 2
+  repeats: 5
+prompt:
+  text: "Explain in one sentence why the sky appears blue."
+  use_chat_template: false

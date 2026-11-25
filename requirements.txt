@@ -1,0 +1,11 @@
+# Tested: Python 3.12, CUDA 12.x driver, NVIDIA Ampere or newer (BF16 + FlashAttention 2).
+# 1) Install PyTorch for your CUDA first, e.g.:
+#      pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+# 2) pip install -r requirements.txt
+# 3) Install FlashAttention 2 matching torch/CUDA/python (see README, step 2).
+transformers==4.57.1
+huggingface-hub==0.36.2
+safetensors==0.8.0
+PyYAML==6.0.3
+einops==0.8.1
+pytest==9.2.0

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acceleratellm"
+version = "0.1.0"
+description = "BF16 + FlashAttention-2 speculative decoding benchmark for Qwen3"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4", "transformers>=4.57.1,<5", "PyYAML>=6", "huggingface-hub>=0.26,<1", "safetensors>=0.4", "einops>=0.8"]
+
+[project.optional-dependencies]
+flash = ["flash-attn>=2.8"]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+acceleratellm = "acceleratellm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

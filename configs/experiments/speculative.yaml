@@ -1,0 +1,13 @@
+# Paired AR vs speculative decoding (Qwen3-0.6B-Base drafts for Qwen3-8B-Base).
+# Also the configuration of the full benchmark suite (scripts/benchmark.py).
+extends:
+  - baseline.yaml
+speculative:
+  draft_lengths: [1, 2, 4]
+  validation_prompts:
+    - "Write a Python function that returns the factorial of a nonnegative integer."
+    - "The capital of France is"
+  sampling_seeds: [101, 202]
+  greedy_implementation: device
+  # BF16 timing runs without numerical replay; see README "Correctness protocol".
+  greedy_tie_fallback: false

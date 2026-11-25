@@ -1,0 +1,4 @@
+# BF16 + FlashAttention 2 + KV cache autoregressive baseline (target only).
+extends:
+  - ../base.yaml
+  - ../models.yaml
