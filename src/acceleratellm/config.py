@@ -46,7 +46,8 @@ def validate_config(config: dict) -> None:
     if unknown := config.keys() - allowed:
         raise ValueError(f"Unknown configuration sections: {sorted(unknown)}")
     expected = {
-        "runtime": {"device", "dtype", "attn_implementation", "local_files_only", "threads"},
+        "runtime": {"device", "dtype", "attn_implementation", "local_files_only", "threads",
+                    "compile", "static_cache_len"},
         "models": {"target", "draft"},
         "generation": {"strategy", "max_new_tokens", "temperature", "top_p"},
         "benchmark": {"warmup", "repeats"},
@@ -67,6 +68,11 @@ def validate_config(config: dict) -> None:
     if type(runtime["local_files_only"]) is not bool:
         raise ValueError("runtime.local_files_only must be boolean")
     _integer(runtime["threads"], "runtime.threads", 1)
+    if type(runtime["compile"]) is not bool:
+        raise ValueError("runtime.compile must be boolean")
+    _integer(runtime["static_cache_len"], "runtime.static_cache_len", 16)
+    if runtime["compile"] and (runtime["device"] != "cuda" or runtime["attn_implementation"] != "sdpa"):
+        raise ValueError("runtime.compile (static cache + CUDA graphs) requires device=cuda and attn_implementation=sdpa")
     for role in ("target", "draft"):
         model = config["models"][role]
         if not isinstance(model, dict) or model.keys() != {"model_id", "revision"}:

@@ -9,6 +9,12 @@ the 80 MT-Bench first-turn prompts.
 - **Acceleration:** speculative decoding (Leviathan et al., 2023) with draft lengths γ.
 - **Reported:** the AR forward-cost profile, the acceptance rate and E[L] for γ = 1…8,
   the theoretical speedup, and measured speedups (paired repeats + full MT-Bench).
+- **Two runtime modes**, each with its own AR baseline:
+  - **eager** (default, [speculative.yaml](configs/experiments/speculative.yaml)): BF16 +
+    FlashAttention 2 + dynamic KV cache.
+  - **compiled** ([speculative_compiled.yaml](configs/experiments/speculative_compiled.yaml)):
+    BF16 + static KV cache + `torch.compile(mode="reduce-overhead")`, i.e. CUDA graphs, with
+    SDPA attention. This mode removes per-kernel CPU dispatch (Section 3.6).
 
 > Contents: [Overview](#1-overview) · [Step-by-step run](#2-step-by-step-run-on-a-new-server) ·
 > [Method](#3-method) · [Outputs](#4-outputs) · [Results](#5-results) ·
@@ -34,7 +40,8 @@ weights) or host time (Python + CUDA kernel-launch dispatch), whichever is large
 dispatch-bound case, the draft/target cost ratio is c ≈ 28/36 = 0.78 layers, which caps
 the speedup at 1/c ≈ 1.29×. In the bandwidth-bound case, c ≈ 1.2/16.4 GB ≈ 0.07 and
 speedups near 2× are possible. The benchmark measures c directly (Section 3.3) and reports
-honestly whether speculative decoding wins.
+honestly whether speculative decoding wins. The compiled mode exists to move the models from
+the first case toward the second.
 
 ---
 
@@ -144,14 +151,28 @@ BENCHMARK_COMPLETE=outputs/<timestamp>-<id>
 If a phase fails, `outputs/<run>/status.json` holds the error and `progress.json` holds
 everything finished so far.
 
+**Compiled mode** (optional, recommended as the second run):
+
+~~~bash
+CONFIG=configs/experiments/speculative_compiled.yaml CUDA_VISIBLE_DEVICES=0 \
+  bash scripts/run_benchmark.sh 2>&1 | tee outputs/benchmark-compiled.log
+~~~
+
+The run first prints `COMPILE_PROBE={...}`, which compares compiled static-cache decoding
+with eager decoding on a toy Qwen3. The first forward pass at each new query length
+triggers compilation, adding a few minutes in total. Compilation happens only in untimed
+warm-up and checking runs, so it does not enter the timings.
+
 ### Step 7: Summarize and bring the results back
 
 ~~~bash
-python scripts/summarize.py --latest   # writes results/summary.md, results/results.json, results/environment.json
+python scripts/summarize.py --latest   # newest run -> results/<gpu>-<eager|compiled>/
 ~~~
 
-`results/` is tracked by git, so commit it to share the measured numbers. `outputs/`
-(raw per-request records) is ignored by git.
+`run_benchmark.sh` already calls this. Each GPU and mode gets its own folder (e.g.
+`results/l4-eager/`, `results/rtx-a5000-compiled/`) containing `summary.md`,
+`results.json` and `environment.json`. `results/` is tracked by git, so commit it to share
+the numbers; `outputs/` (raw per-request records) is ignored.
 
 ---
 
@@ -205,7 +226,7 @@ orchestration (Python per round), so measured speedups are usually slightly lowe
 
 | Phase | What | Prompts |
 | --- | --- | --- |
-| 0 | Tokenizer/vocab check; FlashAttention-2 kernel + KV-crop probe (toy Qwen3, profiler-verified) | — |
+| 0 | Tokenizer/vocab check. Eager mode: FlashAttention-2 kernel + KV-crop probe (toy Qwen3, profiler-verified). Compiled mode: compiled static-cache vs eager dynamic-cache logits and crop probe | — |
 | 1 | AR per model: agreement with `transformers.generate`, timed AR (2 warm-up + 5 repeats), decode-only split, `T(1..9)`; target: one timed AR pass per MT-Bench prompt (defines trajectories) | 3 standard + 80 MT-Bench |
 | 2 | Teacher-forced acceptance for γ = 1…8, by category; predicted speedups | 80 MT-Bench (+3 standard) |
 | 3 | Paired AR vs speculative, 1 warm-up + 3 repeats, off-clock replay check | 3 standard + 1 per MT-Bench category |
@@ -235,6 +256,37 @@ orchestration (Python per round), so measured speedups are usually slightly lowe
 - **Clean GPU:** a preflight before every phase requires one visible GPU, at least 20 GiB
   free and no other compute processes.
 
+### 3.6 Compiled mode: static KV cache + CUDA graphs
+
+At batch size 1, the eager PyTorch loop issues roughly 40–60 small CUDA kernels per decoder
+layer, one at a time from Python. Each costs 20–40 µs of host time, while its GPU work often
+takes under 10 µs. A forward pass therefore costs about (layers × host overhead) rather than
+weight-read time. The 28-layer draft and 36-layer target then differ in cost by only
+28/36, which leaves little room for speculative decoding.
+
+`runtime.compile: true` ([hf_backend.py](src/acceleratellm/models/hf_backend.py)) changes
+this as follows:
+
+- **Static KV cache.** Each model owns one preallocated `transformers.StaticCache`
+  (capacity `runtime.static_cache_len`, default 1024) at fixed addresses. The adapter
+  tracks the valid length and passes explicit `cache_position`/`position_ids`. A rollback
+  only lowers that length: stale slots are overwritten by later writes and hidden by the
+  causal mask. Starting a new request invalidates older cache handles, and using a stale
+  handle raises an error.
+- **CUDA graphs.** Forward passes with at most 16 new tokens (decode = 1, draft catch-up
+  = 2, verification = γ+1) run through
+  `torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)`. There is one
+  recorded CUDA graph per query length, replayed with a single launch. Prefill always
+  runs eagerly, as recommended by transformers. Graph outputs are copied before the next
+  replay.
+- **Attention backend.** SDPA is used instead of FlashAttention 2, because the FA2 path in
+  transformers unpads the attention mask with data-dependent shapes, which CUDA graphs
+  cannot capture. At these context lengths attention is a negligible share of the time.
+- **Verification.** Correctness is checked by CPU tests, where the static cache must
+  equal the dynamic cache for forward, crop, AR and speculative decoding and acceptance
+  counters, and by the GPU `compile_probe`. `results.json` records how many forward passes
+  used the compiled and the eager paths.
+
 ---
 
 ## 4. Outputs
@@ -251,14 +303,14 @@ orchestration (Python per round), so measured speedups are usually slightly lowe
 | `paired-gamma{γ}.json`, `mt-bench-spec-gamma{γ}.json` | Per-request speculative timings and counters |
 | `status.json`, `progress.json` | Run state; partial report on failure |
 
-`results/` (tracked by git) holds `summary.md`, `results.json` and `environment.json`,
-produced by `scripts/summarize.py`.
+`results/<gpu>-<eager|compiled>/` (tracked by git) holds `summary.md`, `results.json` and
+`environment.json`, produced by `scripts/summarize.py`.
 
 ---
 
 ## 5. Results
 
-*To be filled from `results/summary.md` after Step 7.* The summary contains:
+*To be filled from `results/<gpu>-<mode>/summary.md` after Step 7.* Each summary contains:
 
 1. **AR baseline and forward-cost profile:** per-model `T(1)`, ms/layer, `T(q)/T(1)`, AR
    throughput (standard prompts and MT-Bench), decode-only throughput, peak memory.
@@ -277,6 +329,9 @@ produced by `scripts/summarize.py`.
 | `Other compute processes on the GPU` | Pick an idle GPU with `CUDA_VISIBLE_DEVICES`. To run anyway (timings unreliable): `ACCELERATELLM_ALLOW_SHARED_GPU=1` |
 | `Less than 20 GiB free on the GPU` | Use a ≥ 24 GB GPU with nothing else loaded |
 | `Expose exactly one CUDA GPU` | Set `CUDA_VISIBLE_DEVICES` to a single index |
+| `runtime.compile ... requires ... sdpa` | Compiled mode only supports SDPA attention; use `configs/experiments/speculative_compiled.yaml` |
+| `Input exceeds runtime.static_cache_len` | Raise `runtime.static_cache_len` (prompt + new tokens + γ + 1 must fit) |
+| `torch._dynamo` / Inductor errors in compiled mode | Check that torch is 2.8.0 and transformers 4.57.1; set `TORCH_LOGS=recompiles,graph_breaks` for details. The eager mode is unaffected |
 | `ImportError` / undefined symbol in `flash_attn` | The wheel does not match python/torch/CUDA/ABI; reinstall the matching wheel (Step 2) |
 | `No module named einops` (FA2) | `pip install einops==0.8.1` |
 | `Could not import module 'Qwen3ForCausalLM'` | Run `python -c "import transformers.models.qwen3.modeling_qwen3"` to see the real error. Usual causes: transformers 5.x installed (run `pip install -r requirements.txt`), or torchvision/torchaudio that do not match torch (`pip uninstall -y torchvision torchaudio`) |
@@ -294,10 +349,11 @@ configs/
   base.yaml                 runtime (BF16, FA2, cuda), generation (greedy, 128 tokens), timing repeats
   models.yaml               pinned draft/target revisions
   experiments/baseline.yaml       AR baseline
-  experiments/speculative.yaml    speculative settings; also the benchmark configuration
+  experiments/speculative.yaml    speculative settings; also the benchmark configuration (eager)
+  experiments/speculative_compiled.yaml   same study, static KV cache + torch.compile (CUDA graphs)
 src/acceleratellm/
   config.py                 YAML inheritance + strict validation
-  models/                   HF backend (BF16/FA2, KV cache crop), tokenizer/vocab compatibility
+  models/                   HF backend (BF16, FA2/SDPA, dynamic or static+compiled KV cache), tokenizer checks
   decoding/                 AR, speculative (reference + device greedy), sampling, near-tie replay
   evaluation/               timing harness, exact acceptance simulator, speedup cost model
   experiments/              CLI runners (baseline, speculative) + artifact/environment writers
@@ -306,7 +362,7 @@ scripts/
   fetch_models.py, fetch_data.py   downloads (pinned, verified)
   benchmark.py              full 5-phase benchmark
   run_benchmark.sh          bash/sbatch wrapper: checks + tests + benchmark + summary
-  summarize.py              results.json -> results/summary.md
+  summarize.py              results.json -> results/<gpu>-<mode>/summary.md
 tests/                      CPU tests with toy models, incl. end-to-end benchmark dry run
 ~~~
 

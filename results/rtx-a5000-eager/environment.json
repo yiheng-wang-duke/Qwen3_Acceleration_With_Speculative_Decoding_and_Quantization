@@ -1,0 +1,39 @@
+{
+  "python": "3.12.16 | packaged by Anaconda, Inc. | (main, Oct 26 2026, 20:21:38) [GCC 14.3.0]",
+  "python_executable": "/home/yw784/AccelerateLLM/.venv/bin/python",
+  "platform": "Linux-6.5.0-28-generic-x86_64-with-glibc2.35",
+  "packages": {
+    "torch": "2.8.0+cu129",
+    "transformers": "4.57.1",
+    "PyYAML": "6.0.3",
+    "huggingface-hub": "0.36.2",
+    "safetensors": "0.8.0",
+    "triton": "3.4.0",
+    "flash-attn": "2.8.3",
+    "einops": "0.8.1"
+  },
+  "cuda_runtime": "12.9",
+  "cuda_available": true,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA RTX A5000",
+      "uuid": "61d6a829-7e92-2fe9-7b95-dc8ea49faf4b",
+      "memory_bytes": 25425608704,
+      "compute_capability": [
+        8,
+        6
+      ]
+    }
+  ],
+  "slurm": {
+    "SLURM_JOB_ID": "251618",
+    "SLURM_JOB_PARTITION": "athena-mini",
+    "SLURM_JOB_NODELIST": "node1",
+    "SLURM_CPUS_PER_TASK": "4",
+    "CUDA_VISIBLE_DEVICES": "GPU-61d6a829-7e92-2fe9-7b95-dc8ea49faf4b",
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+    "SLURM_JOB_GPUS": "0,5",
+    "ACCELERATELLM_ORIGINAL_CUDA_VISIBLE_DEVICES": "0,5"
+  }
+}

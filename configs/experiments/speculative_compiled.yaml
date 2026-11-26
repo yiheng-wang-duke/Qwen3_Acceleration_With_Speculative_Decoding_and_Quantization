@@ -1,0 +1,11 @@
+# Same study as speculative.yaml, with per-kernel CPU dispatch removed:
+# static KV cache + torch.compile(mode="reduce-overhead") (CUDA graphs) for decode and
+# verification steps. CUDA graphs need static shapes, which the FA2 padding path in
+# transformers does not provide, so attention uses SDPA (PyTorch's fused flash/efficient
+# kernels). Both AR baseline and speculative decoding use the compiled path.
+extends:
+  - speculative.yaml
+runtime:
+  attn_implementation: sdpa
+  compile: true
+  static_cache_len: 1024

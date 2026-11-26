@@ -3,11 +3,20 @@
 
   python scripts/summarize.py --latest                 # newest outputs/*/results.json
   python scripts/summarize.py outputs/<run>/results.json
+
+Default destination: results/<gpu>-<eager|compiled>/ (one folder per GPU and runtime mode).
 """
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
+
+
+def default_output_dir(r: dict) -> Path:
+    gpu = r['gpu_observations'][0]['gpu_name'] if r.get('gpu_observations') else 'unknown-gpu'
+    slug = re.sub(r'[^a-z0-9]+', '-', gpu.lower()).strip('-').removeprefix('nvidia-')
+    return Path('results') / f"{slug}-{'compiled' if r['config']['runtime'].get('compile') else 'eager'}"
 
 
 def latest() -> Path:
@@ -25,6 +34,7 @@ def render(r: dict, env: dict) -> str:
     out = [f"# Benchmark results: {d['model']['model_id']} -> {t['model']['model_id']}", '',
            f"GPU: {gpu}; torch {pk.get('torch')}, transformers {pk.get('transformers')}, flash-attn {pk.get('flash-attn')}; "
            f"dtype {r['config']['runtime']['dtype']}, attention {r['config']['runtime']['attn_implementation']}, "
+           f"mode: {r.get('runtime_mode', 'eager dynamic cache')}; "
            f"batch 1, greedy, max {r['config']['generation']['max_new_tokens']} new tokens. Run: `{r['run_dir']}`.", '',
            '## 1. AR baseline and forward-cost profile', '',
            '| Model | Layers | Params | T(1) ms | ms/layer | T(3)/T(1) | T(5)/T(1) | T(9)/T(1) | AR tok/s (3 prompts) | Decode-only tok/s | MT-Bench AR tok/s | Peak GiB |',
@@ -88,7 +98,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('results', nargs='?', type=Path)
     parser.add_argument('--latest', action='store_true')
-    parser.add_argument('--output-dir', type=Path, default=Path('results'))
+    parser.add_argument('--output-dir', type=Path, help='default: results/<gpu>-<eager|compiled>')
     args = parser.parse_args()
     path = latest() if args.latest or args.results is None else args.results
     r = json.loads(path.read_text())
@@ -96,6 +106,7 @@ def main():
     env = json.loads(env_path.read_text()) if env_path.exists() else {}
     text = render(r, env)
     print(text)
+    args.output_dir = args.output_dir or default_output_dir(r)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / 'summary.md').write_text(text)
     shutil.copyfile(path, args.output_dir / 'results.json')

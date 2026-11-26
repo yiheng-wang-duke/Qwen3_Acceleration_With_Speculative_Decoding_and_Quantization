@@ -6,6 +6,9 @@ runtime:
   attn_implementation: flash_attention_2
   local_files_only: true
   threads: 4
+  # true: StaticCache + torch.compile(mode="reduce-overhead") decode steps (CUDA graphs); needs sdpa.
+  compile: false
+  static_cache_len: 1024  # static KV-cache capacity (prompt + new tokens + draft), used when compile=true
 generation:
   strategy: greedy
   max_new_tokens: 128

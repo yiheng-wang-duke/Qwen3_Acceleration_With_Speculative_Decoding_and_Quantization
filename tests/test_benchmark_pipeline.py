@@ -90,3 +90,28 @@ def test_benchmark_and_summary_end_to_end(tmp_path, tiny_model, tokenizer, monke
     for heading in ("## 1. AR baseline", "## 2. Acceptance", "## 3. Paired timing", "## 4. Full MT-Bench", "**Verdict:**"):
         assert heading in text
     assert (tmp_path / "results/results.json").is_file()
+
+
+def test_bf16_ulp_accepts_floats_and_tensor_scalars():
+    benchmark = _load("benchmark")
+    assert benchmark.bf16_ulp(25.0) == 0.125
+    assert benchmark.bf16_ulp(torch.tensor(12.3)) == 0.0625
+    assert benchmark.bf16_ulp(torch.tensor(25.0, dtype=torch.bfloat16)) == 0.125
+    if torch.cuda.is_available():  # regression: CUDA logits once crashed the divergence diagnostic
+        assert benchmark.bf16_ulp(torch.tensor([25.0], device="cuda").topk(1).values[0]) == 0.125
+
+
+def test_divergence_reports_first_difference(tiny_model):
+    from acceleratellm.decoding.autoregressive import AutoregressiveDecoder
+    from acceleratellm.models.hf_backend import HFModelAdapter
+    benchmark = _load("benchmark")
+    adapter = HFModelAdapter(tiny_model)
+    ids = torch.tensor([[4, 8, 6]])
+    settings = {"strategy": "greedy", "max_new_tokens": 8, "temperature": 1., "top_p": 1.}
+    expected = AutoregressiveDecoder().generate(adapter, ids, settings, set()).token_ids
+    assert benchmark.divergence(adapter, ids, expected, list(expected)) is None
+    actual = expected[:3] + [(expected[3] + 1) % 32] + expected[4:]
+    report = benchmark.divergence(adapter, ids, expected, actual)
+    assert report["position"] == 3 and report["expected_token"] == expected[3]
+    assert report["ar_top2_ids"][0] == expected[3] and report["ar_top2_gap"] >= 0
+    assert report["gap_in_ulps"] == report["ar_top2_gap"] / report["bf16_ulp_at_top"]

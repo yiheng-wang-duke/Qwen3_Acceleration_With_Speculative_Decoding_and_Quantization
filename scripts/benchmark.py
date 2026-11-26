@@ -62,6 +62,11 @@ def sync():
 
 
 def clean():
+    # Compiled mode: dynamo's code cache and the CUDA-graph tree pool keep references to
+    # the compiled model's weights; drop them, or a deleted 8B model stays resident.
+    torch._dynamo.reset()
+    from torch._inductor import cudagraph_trees
+    cudagraph_trees.reset_cudagraph_trees()
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -97,7 +102,8 @@ def preflight():
 
 
 def bf16_ulp(x):
-    x = torch.as_tensor(x, dtype=torch.bfloat16)
+    """Spacing of BF16 values at x; x may be a Python float or a (CUDA) tensor scalar."""
+    x = torch.tensor(float(x), dtype=torch.bfloat16)  # CPU scalar: never mixes devices
     return float(torch.nextafter(x, torch.tensor(float('inf'), dtype=torch.bfloat16)) - x)
 
 
@@ -175,6 +181,36 @@ def kernel_probe(dtype):
 
 
 @torch.inference_mode()
+def compile_probe(dtype):
+    """Compiled static-cache decoding (CUDA graphs) vs eager dynamic cache on a toy Qwen3."""
+    seed_all(42)
+    cfg = Qwen3Config(vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+                      num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+                      max_position_embeddings=256, attention_dropout=0.)
+    cfg._attn_implementation = 'sdpa'
+    model = Qwen3ForCausalLM(cfg).to(dtype=dtype, device='cuda').eval()
+    eager = HFModelAdapter(model)
+    compiled = HFModelAdapter(model, static_cache_len=64, compile_mode='reduce-overhead')
+    ids = torch.tensor([[3, 8, 12, 19, 5, 20, 7, 6, 21, 9, 30, 2]], device='cuda')
+    started = time.perf_counter()
+    errors = []
+    for _ in range(2):  # second pass replays the recorded graphs
+        a, b = eager.forward(ids[:, :5]), compiled.forward(ids[:, :5])
+        for tokens, keep in [(ids[:, 5:8], 6), (ids[:, 6:8], 8), (ids[:, 8:9], 9), (ids[:, 9:12], 10)]:
+            a, b = eager.forward(tokens, a.cache), compiled.forward(tokens, b.cache)
+            if not bool(torch.isfinite(b.logits).all()):
+                raise FloatingPointError('Non-finite compiled probe logits')
+            torch.testing.assert_close(b.logits.float(), a.logits.float(), atol=.05, rtol=.05)
+            errors.append(float((a.logits.float() - b.logits.float()).abs().max()))
+            a.cache, b.cache = eager.crop_cache(a.cache, keep), compiled.crop_cache(b.cache, keep)
+    if compiled.call_counts['compiled'] == 0:
+        raise RuntimeError('Compiled decode path was never used')
+    return {'mode': 'static cache + torch.compile(reduce-overhead)', 'dtype': str(dtype),
+            'max_abs_error_vs_eager_dynamic': max(errors), 'call_counts': compiled.call_counts,
+            'seconds_including_compilation': time.perf_counter() - started}
+
+
+@torch.inference_mode()
 def component_costs(adapter, tokenizer):
     source = tokenizer('The following is a detailed explanation of a scientific experiment. ' * 120,
                        return_tensors='pt', add_special_tokens=False).input_ids.to(adapter.device)
@@ -207,7 +243,8 @@ def model_facts(adapter):
             'parameter_bytes': sum(p.numel() * p.element_size() for p in params),
             'num_hidden_layers': cfg.num_hidden_layers, 'hidden_size': cfg.hidden_size,
             'vocab_size': adapter.vocab_size, 'dtype': str(params[0].dtype),
-            'attn_implementation': cfg._attn_implementation}
+            'attn_implementation': cfg._attn_implementation,
+            'compile_mode': adapter.compile_mode, 'static_cache_len': adapter.static_cache_len}
 
 
 def profile_model(role, spec, root, config, standard, mt_bench, tokenizer):
@@ -222,8 +259,8 @@ def profile_model(role, spec, root, config, standard, mt_bench, tokenizer):
         ids = _prompt_ids(tokenizer, p['text'], False, adapter.device)
         reference = _reference(adapter, ids, settings, tokenizer, eos)
         checked = AutoregressiveDecoder().generate(adapter, ids, settings, eos).token_ids
-        # transformers.generate passes an attention mask (FA2 varlen kernel); our loop
-        # does not. In BF16 that may flip near ties, so it is diagnosed, not asserted.
+        # transformers.generate runs eagerly with an attention mask (FA2: varlen kernel);
+        # our loop may use other kernels/graphs. BF16 near ties can flip: diagnosed, not asserted.
         entry['hf_agreement'].append({'prompt': p['id'], 'equal': checked == reference,
                                       'divergence': divergence(adapter, ids, checked, reference)})
         trajectories[p['id']] = checked
@@ -276,6 +313,7 @@ def profile_model(role, spec, root, config, standard, mt_bench, tokenizer):
           f'{summary["decode_only_tokens_per_second"]:.2f} tok/s, T1 {q["1"]*1e3:.2f} ms'
           + (f', MT-Bench {entry["mt_bench"]["request_tokens_per_second"]:.2f} tok/s' if role == 'target' else ''),
           flush=True)
+    entry['call_counts'] = dict(adapter.call_counts)
     del adapter
     clean()
     return entry, trajectories
@@ -415,6 +453,7 @@ def paired_and_full(report, root, config, prompts, subset, tokenizer, trajectori
                                'autoregressive_tokens_per_second': report['models']['target']['mt_bench']['request_tokens_per_second'],
                                'speculative': full,
                                'scope': 'one timed pass per prompt after one warm-up request; AR from phase 1 (target only loaded)'}
+    report['call_counts_paired_and_full'] = {'target': dict(target.call_counts), 'draft': dict(draft.call_counts)}
     del target, draft
     clean()
 
@@ -436,13 +475,20 @@ def main():
     subset = [p['id'] for p in standard] + stratified_subset(mt_bench)
     report = {'schema_version': 1, 'run_dir': str(root), 'slurm_job_id': os.environ.get('SLURM_JOB_ID'),
               'models': {}, 'config': config, 'gpu_observations': GPU_OBSERVATIONS, 'paired_subset': subset,
+              'runtime_mode': ('compiled static cache (CUDA graphs)' if config['runtime']['compile']
+                               else 'eager dynamic cache') + f" + {config['runtime']['attn_implementation']}",
               'prompt_format': "MT-Bench first turn as 'Question: {turn}\\nAnswer:'; standard prompts raw; no chat template",
               'theory_formula': 'S(gamma) = E[L] * T_t(1) / (gamma * T_d(1) + T_t(gamma+1)), E[L] = 1 + accepted/verification'}
     try:
         tokenizer = load_tokenizer(config['models']['target'], True)
         report['compatibility'] = check_model_pair(config['models'], True)
         preflight()
-        report['kernel_probe'] = kernel_probe(getattr(torch, config['runtime']['dtype']))
+        dtype = getattr(torch, config['runtime']['dtype'])
+        if config['runtime']['attn_implementation'] == 'flash_attention_2':
+            report['kernel_probe'] = kernel_probe(dtype)
+        if config['runtime']['compile']:
+            report['compile_probe'] = compile_probe(dtype)
+            print('COMPILE_PROBE=' + json.dumps(report['compile_probe']), flush=True)
         clean()
         trajectories = {}
         for role in ('draft', 'target'):

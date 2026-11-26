@@ -12,24 +12,26 @@
 #   bash scripts/run_benchmark.sh                     # machine with one idle GPU
 #   CUDA_VISIBLE_DEVICES=3 bash scripts/run_benchmark.sh
 #   sbatch -p <partition> scripts/run_benchmark.sh    # Slurm (run `mkdir -p outputs` first)
+#   CONFIG=configs/experiments/speculative_compiled.yaml bash scripts/run_benchmark.sh   # CUDA graphs
 #
-# Environment overrides: PYTHON (default: python), ACCELERATELLM_ALLOW_SHARED_GPU=1.
+# Environment overrides: CONFIG (default: configs/experiments/speculative.yaml),
+# PYTHON (default: python), ACCELERATELLM_ALLOW_SHARED_GPU=1.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 mkdir -p outputs
 PYTHON="${PYTHON:-python}"
+CONFIG="${CONFIG:-configs/experiments/speculative.yaml}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
 export USE_TF=0 USE_FLAX=0   # images with TensorFlow/JAX preinstalled (e.g. Colab): keep transformers PyTorch-only
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "HOST=$(hostname) CPU=$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p')"
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,driver_version --format=csv || true
 "$PYTHON" -m acceleratellm doctor
-"$PYTHON" -m acceleratellm check-models --config configs/experiments/speculative.yaml
+"$PYTHON" -m acceleratellm check-models --config "$CONFIG"
 "$PYTHON" -m pytest -q
-"$PYTHON" scripts/benchmark.py --config configs/experiments/speculative.yaml
+"$PYTHON" scripts/benchmark.py --config "$CONFIG"
 "$PYTHON" scripts/summarize.py --latest
