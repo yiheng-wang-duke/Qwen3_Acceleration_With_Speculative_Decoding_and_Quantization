@@ -43,6 +43,13 @@ speedups near 2× are possible. The benchmark measures c directly (Section 3.3) 
 honestly whether speculative decoding wins. The compiled mode exists to move the models from
 the first case toward the second.
 
+**Headline (RTX A5000, full MT-Bench, [Section 5](#5-results)):**
+
+| Mode | Target AR | Best speculative | Speedup |
+| --- | ---: | ---: | ---: |
+| Eager + FA2 | 18.30 tok/s | 18.53 tok/s (γ = 1) | 1.02× |
+| Compiled (CUDA graphs) | 36.17 tok/s | 66.87 tok/s (γ = 4) | **1.83×** |
+
 ---
 
 ## 2. Step-by-step run on a new server
@@ -286,6 +293,10 @@ this as follows:
   equal the dynamic cache for forward, crop, AR and speculative decoding and acceptance
   counters, and by the GPU `compile_probe`. `results.json` records how many forward passes
   used the compiled and the eager paths.
+- **Memory release.** Dynamo's code cache and the CUDA-graph pool keep references to a
+  compiled model's weights. Between phases, `benchmark.py` therefore calls
+  `torch._dynamo.reset()` and resets the CUDA-graph trees before freeing memory, so a
+  deleted 8B model does not stay resident. Each phase recompiles, which takes about 30 s.
 
 ---
 
@@ -310,15 +321,80 @@ this as follows:
 
 ## 5. Results
 
-*To be filled from `results/<gpu>-<mode>/summary.md` after Step 7.* Each summary contains:
+Measured on one **NVIDIA RTX A5000** (24 GB, 768 GB/s) with torch 2.8.0+cu129 and
+transformers 4.57.1: BF16, batch 1, greedy, at most 128 new tokens, 80 MT-Bench first-turn
+prompts. Full tables: [results/rtx-a5000-eager/summary.md](results/rtx-a5000-eager/summary.md)
+and [results/rtx-a5000-compiled/summary.md](results/rtx-a5000-compiled/summary.md).
 
-1. **AR baseline and forward-cost profile:** per-model `T(1)`, ms/layer, `T(q)/T(1)`, AR
-   throughput (standard prompts and MT-Bench), decode-only throughput, peak memory.
-2. **Acceptance and predicted speedup:** α, prefix acceptance, E[L] and predicted speedup
-   for γ = 1…8; E[L] per MT-Bench category.
-3. **Paired timing:** measured speedup vs AR, measured vs predicted E[L], greedy agreement.
-4. **Full MT-Bench timing:** request-level speedup per γ, and the verdict on whether
-   speculative decoding beats the BF16 AR baseline.
+**Summary.** In eager mode, speculative decoding only breaks even (best 1.02×), because
+the draft is dispatch-bound and costs 75% of a target step. CUDA graphs cut the draft step
+8× and the target step 2×. Against the 2× faster compiled AR baseline, speculative
+decoding then gives **1.83× on full MT-Bench** (γ = 4), about **3.65× end to end** over
+eager AR.
+
+### 5.1 Forward cost per decode step
+
+| | Eager + FA2 + DynamicCache | Compiled (StaticCache + CUDA graphs) + SDPA |
+| --- | ---: | ---: |
+| Draft 0.6B `T(1)` | 40.71 ms (1.45 ms/layer) | **5.00 ms** (0.18 ms/layer) |
+| Target 8B `T(1)` | 54.65 ms (1.52 ms/layer) | **27.27 ms** (0.76 ms/layer) |
+| Target `T(5)/T(1)` (verifying 4 drafts) | 0.99 | 1.02 |
+| Cost ratio c = T_d/T_t | 0.745 (ceiling 1.34×) | **0.183** (ceiling 5.45×) |
+| Target AR, MT-Bench | 18.30 tok/s | **36.17 tok/s** |
+| Peak memory (both models) | 16.42 GiB | 16.66 GiB |
+
+In eager mode the per-layer cost is about 1.5 ms for both models, whatever their width, so
+the forward pass is host-dispatch bound and c ≈ the layer ratio. Compiled, the target reads
+16.4 GB of weights in 27.3 ms, about 78% of the A5000's peak bandwidth, so it is now
+bandwidth bound. Verifying γ+1 tokens costs almost the same as decoding 1 in both modes.
+
+### 5.2 Acceptance
+
+Acceptance depends only on the models, so it is nearly the same in both modes. The small
+differences come from BF16 near-ties.
+
+| γ | 1 | 2 | 3 | 4 | 6 | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prefix acceptance | 0.80 | 0.72 | 0.65 | 0.59 | 0.49 | 0.41 |
+| E[L] tokens / verification (compiled) | 1.79 | 2.42 | 2.92 | 3.32 | 3.89 | 4.22 |
+
+Per-token agreement α = 0.81. It varies by category, from math 0.92, extraction 0.90 and
+coding 0.87 down to writing, roleplay and reasoning at about 0.73–0.75. Measured E[L]
+matches the teacher-forced simulation to within ±0.08.
+
+### 5.3 Speculative decoding vs AR (full MT-Bench, 80 prompts)
+
+| γ | Eager: tok/s | Eager: speedup | Compiled: predicted | Compiled: tok/s | Compiled: speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| AR | 18.30 | 1.00× | – | 36.17 | 1.00× |
+| 1 | 18.53 | **1.018×** | 1.48× | 52.54 | 1.447× |
+| 2 | 17.61 | 0.963× | 1.72× | 62.01 | 1.707× |
+| 4 | 14.91 | 0.814× | 1.85× | 66.87 | **1.833×** |
+
+The cost model (Section 3.3) predicts the compiled speedups to within 1–2%. The paired
+subset (11 prompts × 3 repeats) agrees: 1.47×, 1.73× and 1.92× for γ = 1, 2, 4. For
+compiled mode, the theory puts the optimum at γ = 4 (1.85× request, 1.91× decode-only),
+with γ = 3–5 within 2% of it.
+
+**Output equality.** 37–38 of 80 compiled outputs (32 of 80 eager) are token-identical to
+AR. Every divergence starts at a near-tie, where the AR top-2 logit gap is ≤ 2 BF16 ULP and
+the 1-token and (γ+1)-token kernels round differently. These divergences come from BF16
+arithmetic, not from the algorithm. The float32 CPU tests require exact equality.
+
+**Evidence that CUDA graphs were used.** In the compiled run, 98.5% of draft and target
+forward passes in the timed phases went through the compiled path (80,799 of 82,044). The eager remainder is
+the prefills.
+
+### 5.4 Conclusions
+
+1. With the stock eager Hugging Face loop, speculative decoding at this model pair
+   cannot help, even though α ≈ 0.8. The bottleneck is not acceptance but the draft's
+   CPU dispatch cost (c = 0.75).
+2. Removing dispatch overhead with a static cache and CUDA graphs makes the AR baseline
+   itself 2× faster. It also makes the 0.6B draft cheap relative to the 8B target
+   (c = 0.18), so speculative decoding then adds a further 1.83×.
+3. Best configuration: compiled mode, γ = 4, 66.9 tok/s, versus 36.2 tok/s for compiled AR
+   and 18.3 tok/s for eager AR.
 
 ---
 
