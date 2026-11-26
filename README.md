@@ -1,9 +1,42 @@
 # AccelerateLLM
 
-Does speculative decoding speed up LLM inference compared with a strong autoregressive
-baseline? This repository measures it for **Qwen3-0.6B-Base (draft) → Qwen3-8B-Base
-(target)** with **BF16 + FlashAttention 2 + KV cache**, batch size 1, greedy decoding, on
-the 80 MT-Bench first-turn prompts.
+English | [中文](README_cn.md)
+
+**Speculative decoding for Qwen3-8B with a Qwen3-0.6B draft: 1.83× over a CUDA-graph AR
+baseline, 3.65× over eager Hugging Face decoding. Outputs are the target's own greedy
+outputs, up to BF16 rounding at near-ties.**
+
+## Key results
+
+One NVIDIA RTX A5000, BF16, batch 1, greedy decoding, 80 MT-Bench first-turn prompts.
+Every speed is measured end to end per request, including prefill.
+
+| Configuration | Throughput | vs eager AR | vs compiled AR |
+| --- | ---: | ---: | ---: |
+| Eager AR (FlashAttention 2 + KV cache) | 18.30 tok/s | 1.00× | 0.51× |
+| Eager speculative, best γ = 1 | 18.53 tok/s | 1.02× | – |
+| Compiled AR (static KV cache + CUDA graphs) | 36.17 tok/s | 1.98× | 1.00× |
+| **Compiled speculative, γ = 4** | **66.87 tok/s** | **3.65×** | **1.83×** |
+
+- **Why eager mode fails.** In the stock Hugging Face loop every layer costs about 1.5 ms
+  of CPU kernel dispatch, whatever its width. The 0.6B draft therefore costs 75% of an 8B
+  target step (c = 0.745), and speculative decoding only breaks even, even though 81% of
+  draft tokens match.
+- **What fixes it.** A static KV cache plus `torch.compile(mode="reduce-overhead")` removes
+  the dispatch cost. The draft step falls 8× (40.7 → 5.0 ms) and the target step 2×
+  (54.7 → 27.3 ms, about 78% of peak memory bandwidth), so c falls to 0.183.
+- **The theory matches.** The cost model predicts 1.48× / 1.72× / 1.85× for γ = 1 / 2 / 4,
+  and the measured values are 1.45× / 1.71× / 1.83×. Measured acceptance matches the exact
+  teacher-forced simulation to within ±0.08 tokens per verification.
+
+Details: [Section 5](#5-results), [results/rtx-a5000-compiled/summary.md](results/rtx-a5000-compiled/summary.md),
+[results/rtx-a5000-eager/summary.md](results/rtx-a5000-eager/summary.md).
+
+## What this repository does
+
+It measures whether speculative decoding speeds up LLM inference compared with a strong
+autoregressive baseline, for **Qwen3-0.6B-Base (draft) → Qwen3-8B-Base (target)** in BF16
+at batch size 1, with greedy decoding on the 80 MT-Bench first-turn prompts.
 
 - **Baseline:** autoregressive (AR) decoding of the target.
 - **Acceleration:** speculative decoding (Leviathan et al., 2023) with draft lengths γ.
@@ -42,13 +75,6 @@ the speedup at 1/c ≈ 1.29×. In the bandwidth-bound case, c ≈ 1.2/16.4 GB �
 speedups near 2× are possible. The benchmark measures c directly (Section 3.3) and reports
 honestly whether speculative decoding wins. The compiled mode exists to move the models from
 the first case toward the second.
-
-**Headline (RTX A5000, full MT-Bench, [Section 5](#5-results)):**
-
-| Mode | Target AR | Best speculative | Speedup |
-| --- | ---: | ---: | ---: |
-| Eager + FA2 | 18.30 tok/s | 18.53 tok/s (γ = 1) | 1.02× |
-| Compiled (CUDA graphs) | 36.17 tok/s | 66.87 tok/s (γ = 4) | **1.83×** |
 
 ---
 
