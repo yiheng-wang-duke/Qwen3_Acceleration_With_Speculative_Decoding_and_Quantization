@@ -1,0 +1,24 @@
+{
+  "python": "3.12.16",
+  "platform": "Linux-6.5.0-28-generic-x86_64-with-glibc2.35",
+  "packages": {
+    "torch": "2.8.0+cu129",
+    "transformers": "4.57.1",
+    "torchao": "0.13.0",
+    "gptqmodel": "4.2.5"
+  },
+  "gpu": [
+    "NVIDIA RTX A5000"
+  ],
+  "slurm_jobs": [
+    "251893",
+    "251894",
+    "251918",
+    "251919",
+    "252209",
+    "252245",
+    "252246",
+    "252205",
+    "252261"
+  ]
+}

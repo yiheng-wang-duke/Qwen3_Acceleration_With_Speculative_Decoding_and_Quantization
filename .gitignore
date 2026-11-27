@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .venv/
+*.log
 # Root-anchored: src/acceleratellm/data/ is source code and must stay tracked.
 /data/
 /checkpoints/

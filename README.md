@@ -424,6 +424,32 @@ the prefills.
 
 ---
 
+### 5.5 Weight-only quantization × speculative decoding (draft section)
+
+Follow-up study: `scripts/quant_spec.py` (one target/draft pair per process, compiled mode, same
+80 MT-Bench prompts) and `scripts/gptq_quantize.py` (GPTQ W4 g128 checkpoint of the target, 128
+RedPajama-V2 calibration sequences, run with gptqmodel's Marlin kernel). Full tables:
+[results/rtx-a5000-quant-spec/summary.md](results/rtx-a5000-quant-spec/summary.md).
+
+| Target (draft: BF16 0.6B) | PPL (BF16 9.44) | AR tok/s | AR vs BF16 | Best spec tok/s (γ) | Spec vs own AR | Spec vs BF16 AR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BF16 | 9.44 | 36.4 | 1.00× | 66.8 (5) | 1.82× | 1.83× |
+| int8 weight-only (torchao) | 9.48 | 46.7 | 1.28× | 40.5 (5) | 0.86× | 1.11× |
+| int4 RTN g128, lm_head BF16 (torchao) | 10.90 | 56.3 | 1.55× | 98.1 (2) | 1.71× | 2.69× |
+| **GPTQ W4 g128 + Marlin, lm_head BF16** | **9.72** | **74.6** | **2.05×** | **100.1 (2)** | 1.34× | **2.75×** |
+
+- **The two methods compose.** Every int4 target gains another 1.3–1.9× from speculative decoding.
+  The best quality/speed point is GPTQ-Marlin + speculative decoding: 2.75× BF16 AR at +3 % PPL.
+- **The extra gain shrinks with a faster target.** The 0.6B draft stays at about 5 ms per step,
+  because it is kernel-count bound, so c rises from 0.19 to 0.39 and the best γ drops from 4–5 to 2.
+- **Verification cost must stay flat.** Marlin's T(5)/T(1) is 1.05. torchao int8 weight-only has a
+  fused kernel only for one query token (T(5)/T(1) = 3.16), so speculative decoding is slower than
+  AR at every γ.
+- **Do not quantize the draft.** An int8 0.6B draft is slower (8.2 vs 5 ms) at the same acceptance.
+  An int4 copy of the 8B target as the draft reaches α = 0.85 but only 1.13–1.17×.
+- **Quality.** Quantizing the untied lm_head to int4 raises PPL from 10.90 to 12.90. HQQ did not help.
+  GPTQ calibration recovers most of the loss (9.72).
+
 ## 6. Troubleshooting
 
 | Symptom | Fix |

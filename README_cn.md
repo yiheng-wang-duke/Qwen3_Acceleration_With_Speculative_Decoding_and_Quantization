@@ -380,6 +380,30 @@ eager 模式下，两个模型每层耗时都约 1.5 ms，与宽度无关，说�
 
 ---
 
+### 5.5 仅权重量化 × 投机解码（草稿）
+
+后续实验：`scripts/quant_spec.py`（每个进程跑一组 target/draft，编译模式，同样 80 条 MT-Bench）和
+`scripts/gptq_quantize.py`（target 的 GPTQ W4 g128 checkpoint，128 条 RedPajama-V2 校准序列，用 gptqmodel
+的 Marlin kernel 推理）。完整表格见 [results/rtx-a5000-quant-spec/summary.md](results/rtx-a5000-quant-spec/summary.md)。
+
+| Target（draft：BF16 0.6B） | 困惑度（BF16 9.44） | AR tok/s | AR 相对 BF16 | 最佳投机 tok/s（γ） | 相对自身 AR | 相对 BF16 AR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BF16 | 9.44 | 36.4 | 1.00× | 66.8 (5) | 1.82× | 1.83× |
+| int8 仅权重（torchao） | 9.48 | 46.7 | 1.28× | 40.5 (5) | 0.86× | 1.11× |
+| int4 RTN g128，lm_head 保留 BF16（torchao） | 10.90 | 56.3 | 1.55× | 98.1 (2) | 1.71× | 2.69× |
+| **GPTQ W4 g128 + Marlin，lm_head 保留 BF16** | **9.72** | **74.6** | **2.05×** | **100.1 (2)** | 1.34× | **2.75×** |
+
+- **两种方法可以叠加。** 所有 int4 target 在量化 AR 之上，投机解码还能再加速 1.3–1.9×。质量和速度兼顾的最佳点是
+  GPTQ-Marlin + 投机解码：相对 BF16 AR 2.75×，困惑度只上升 3%。
+- **target 越快，额外收益越小。** 0.6B draft 受 kernel 数量限制，每步始终约 5 ms，所以 c 从 0.19 升到 0.39，
+  最佳 γ 从 4–5 降到 2。
+- **验证代价必须保持平坦。** Marlin 的 T(5)/T(1) 是 1.05。torchao int8 仅权重量化只在单个 query token 时有融合
+  kernel（T(5)/T(1) = 3.16），所以投机解码在所有 γ 下都比 AR 慢。
+- **不要量化 draft。** int8 的 0.6B draft 在接受率相同的情况下更慢（8.2 vs 5 ms）。用 8B 自身的 int4 副本作
+  draft，接受率达到 0.85，但加速只有 1.13–1.17×。
+- **质量。** 把未共享权重的 lm_head 也量化成 int4，会让困惑度从 10.90 升到 12.90。HQQ 没有帮助。GPTQ 校准挽回了
+  大部分损失（9.72）。
+
 ## 6. 常见问题
 
 | 现象 | 解决办法 |
